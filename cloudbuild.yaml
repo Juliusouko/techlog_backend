@@ -1,0 +1,6 @@
+steps:
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['app', 'deploy', '--quiet']
+
+options:
+  logging: CLOUD_LOGGING_ONLY
