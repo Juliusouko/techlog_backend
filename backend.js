@@ -83,7 +83,7 @@ pgPool.connect()
         console.error('PostgreSQL init error:', err);
     });
 app.use(bodyParser.json());
-app.use(cors()); // Enable CORS for all routes
+app.use(bodyParser.urlencoded({ extended: true }));
 
 // --- Database Setup ---
 // Use pgPool as the PostgreSQL client.
@@ -200,41 +200,51 @@ const getLikeCount = (postId) => {
 
 // GET all blog posts with author usernames and like counts
 app.get('/posts', async (req, res) => {
-    const { search, category } = req.query;
-    let query = `SELECT p.id, p.title, p.content, p.categories, p.createdAt, p.updatedAt, u.username AS author, u.id AS author_id
-                 FROM posts p
-                 JOIN users u ON p.author_id = u.id`;
-    let params = [];
-    let whereClauses = [];
+  const { search, category } = req.query;
+  let query = `
+    SELECT p.id, p.title, p.content, p.categories, p.createdAt, p.updatedAt, 
+           u.username AS author, u.id AS author_id
+    FROM posts p
+    JOIN users u ON p.author_id = u.id`;
+  let params = [];
+  let whereClauses = [];
 
-    if (search) {
-        whereClauses.push('(p.title LIKE ? OR p.content LIKE ?)');
-        params.push(`%${search}%`, `%${search}%`);
-    }
-    if (category) {
-        whereClauses.push('p.categories LIKE ?');
-        params.push(`%${category}%`);
-    }
+  if (search) {
+    whereClauses.push(`(p.title ILIKE $${params.length + 1} OR p.content ILIKE $${params.length + 2})`);
+    params.push(`%${search}%`, `%${search}%`);
+  }
 
-    if (whereClauses.length > 0) {
-        query += ` WHERE ${whereClauses.join(' AND ')}`;
-    }
+  if (category) {
+    whereClauses.push(`p.categories ILIKE $${params.length + 1}`);
+    params.push(`%${category}%`);
+  }
 
-    query += ` ORDER BY p.createdAt DESC`;
+  if (whereClauses.length > 0) {
+    query += ` WHERE ${whereClauses.join(' AND ')}`;
+  }
 
-    db.all(query, params, async (err, rows) => {
-        if (err) {
-            console.error('Error fetching posts:', err.message);
-            return res.status(500).json({ message: 'Error fetching posts' });
-        }
-        // Fetch like counts for each post
-        const postsWithLikes = await Promise.all(rows.map(async (post) => {
-            const likes = await getLikeCount(post.id);
-            return { ...post, likes };
-        }));
-        res.status(200).json(postsWithLikes);
-    });
+  query += ` ORDER BY p.createdAt DESC`;
+
+  try {
+    const result = await pgPool.query(query, params);
+
+    // Optional: fetch like counts — assuming you have a likes table
+    const postsWithLikes = await Promise.all(result.rows.map(async (post) => {
+      const likeResult = await pgPool.query(
+        'SELECT COUNT(*) FROM post_likes WHERE post_id = $1',
+        [post.id]
+      );
+      const likes = parseInt(likeResult.rows[0].count || '0');
+      return { ...post, likes };
+    }));
+
+    res.status(200).json(postsWithLikes);
+  } catch (err) {
+    console.error('Error fetching posts:', err.message);
+    res.status(500).json({ message: 'Error fetching posts' });
+  }
 });
+
 
 // GET a single blog post by ID with author username and like count
 app.get('/posts/:id', async (req, res) => {
