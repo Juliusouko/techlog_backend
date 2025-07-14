@@ -1,79 +1,89 @@
 const express = require('express');
 const bodyParser = require('body-parser');
-const sqlite3 = require('sqlite3').verbose();
 const cors = require('cors');
 const bcrypt = require('bcrypt'); // For password hashing
 const jwt = require('jsonwebtoken'); // For JWT authentication
+require('dotenv').config(); // Load environment variables from .env file
+const { Pool } = require('pg');
 
 const app = express();
 const port = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret_key'; // IMPORTANT: Use a strong, random key in production!
 
+console.log('DATABASE_URL:', process.env.DATABASE_URL);
+
+
 // Middleware
+
+// --- PostgreSQL Setup ---
+const pgPool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
+});
+
+// --- PostgreSQL Table Creation (clean version, dependency order) ---
+pgPool.connect()
+    .then(() => {
+        console.log('Connected to the PostgreSQL database.');
+
+        // Create tables in the correct dependency order
+        return pgPool.query(`
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                username TEXT UNIQUE NOT NULL,
+                email TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL
+            );
+        `);
+    })
+    .then(() => {
+        console.log('Users table checked/created.');
+        return pgPool.query(`
+            CREATE TABLE IF NOT EXISTS posts (
+                id SERIAL PRIMARY KEY,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                categories TEXT,
+                author_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                createdAt TEXT NOT NULL,
+                updatedAt TEXT
+            );
+        `);
+    })
+    .then(() => {
+        console.log('Posts table checked/created.');
+        return pgPool.query(`
+            CREATE TABLE IF NOT EXISTS comments (
+                id SERIAL PRIMARY KEY,
+                post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+                author_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                content TEXT NOT NULL,
+                createdAt TEXT NOT NULL
+            );
+        `);
+    })
+    .then(() => {
+        console.log('Comments table checked/created.');
+        return pgPool.query(`
+            CREATE TABLE IF NOT EXISTS post_likes (
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+                PRIMARY KEY (user_id, post_id)
+            );
+        `);
+    })
+    .then(() => {
+        console.log('Post Likes table checked/created.');
+    })
+    .catch(err => {
+        console.error('PostgreSQL init error:', err);
+    });
 app.use(bodyParser.json());
 app.use(cors()); // Enable CORS for all routes
 
 // --- Database Setup ---
-const db = new sqlite3.Database('./blog.db', (err) => {
-    if (err) {
-        console.error('Error connecting to database:', err.message);
-    } else {
-        console.log('Connected to the SQLite database.');
-        db.serialize(() => {
-            // Users table: password is now hashed, email is unique
-            db.run(`CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT UNIQUE NOT NULL,
-                email TEXT UNIQUE NOT NULL,
-                password TEXT NOT NULL
-            )`, (err) => {
-                if (err) console.error('Error creating users table:', err.message);
-                else console.log('Users table checked/created.');
-            });
-
-            // Posts table: includes categories and likes (will be managed by join table for unique likes)
-            db.run(`CREATE TABLE IF NOT EXISTS posts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL,
-                content TEXT NOT NULL,
-                categories TEXT,
-                author_id INTEGER NOT NULL,
-                createdAt TEXT NOT NULL,
-                updatedAt TEXT,
-                FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE CASCADE
-            )`, (err) => {
-                if (err) console.error('Error creating posts table:', err.message);
-                else console.log('Posts table checked/created.');
-            });
-
-            // Comments table: Stores comments for posts
-            db.run(`CREATE TABLE IF NOT EXISTS comments (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                post_id INTEGER NOT NULL,
-                author_id INTEGER NOT NULL,
-                content TEXT NOT NULL,
-                createdAt TEXT NOT NULL,
-                FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE,
-                FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE CASCADE
-            )`, (err) => {
-                if (err) console.error('Error creating comments table:', err.message);
-                else console.log('Comments table checked/created.');
-            });
-
-            // New: post_likes table to track unique likes per user per post
-            db.run(`CREATE TABLE IF NOT EXISTS post_likes (
-                user_id INTEGER NOT NULL,
-                post_id INTEGER NOT NULL,
-                PRIMARY KEY (user_id, post_id),
-                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-                FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
-            )`, (err) => {
-                if (err) console.error('Error creating post_likes table:', err.message);
-                else console.log('Post Likes table checked/created.');
-            });
-        });
-    }
-});
+// Use pgPool as the PostgreSQL client.
+const db = pgPool;
 
 // --- Authentication Middleware (JWT-based) ---
 const authenticateToken = (req, res, next) => {
@@ -112,25 +122,23 @@ app.post('/register', async (req, res) => {
 
     try {
         const hashedPassword = await bcrypt.hash(password, 10); // Hash the password
-        db.run("INSERT INTO users (username, email, password) VALUES (?, ?, ?)", [username, email, hashedPassword], function(err) {
-            if (err) {
-                if (err.message.includes('UNIQUE constraint failed')) {
-                    return res.status(409).json({ message: 'Username or email already exists' });
-                }
-                console.error('Error registering user:', err.message);
-                return res.status(500).json({ message: 'Error registering user' });
-            }
-            // User registered successfully, issue a token immediately
-            const token = jwt.sign({ id: this.lastID }, JWT_SECRET, { expiresIn: '1h' });
-            res.status(201).json({
-                message: 'User registered successfully',
-                userId: this.lastID,
-                username: username,
-                token: token
-            });
+        const result = await db.query(
+            "INSERT INTO users (username, email, password) VALUES ($1, $2, $3) RETURNING id",
+            [username, email, hashedPassword]
+        );
+        const userId = result.rows[0].id;
+        const token = jwt.sign({ id: userId }, JWT_SECRET, { expiresIn: '1h' });
+        res.status(201).json({
+            message: 'User registered successfully',
+            userId: userId,
+            username: username,
+            token: token
         });
-    } catch (hashErr) {
-        console.error('Error hashing password:', hashErr);
+    } catch (err) {
+        if (err.code === '23505') { // Unique violation
+            return res.status(409).json({ message: 'Username or email already exists' });
+        }
+        console.error('Error registering user:', err.message);
         res.status(500).json({ message: 'Internal server error during registration.' });
     }
 });
