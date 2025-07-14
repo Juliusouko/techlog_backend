@@ -1,6 +1,12 @@
 const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
+
+app.use(cors({
+  origin: ['http://localhost:5174', 'https://your-frontend.web.app'], // add your Firebase frontend too
+  credentials: true
+}));
+
 const bcrypt = require('bcrypt'); // For password hashing
 const jwt = require('jsonwebtoken'); // For JWT authentication
 require('dotenv').config(); // Load environment variables from .env file
