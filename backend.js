@@ -470,6 +470,10 @@ app.delete('/comments/:id', authenticateToken, (req, res) => {
     });
 });
 
+app.get('/', (req, res) => {
+  res.send('Tech Logs Backend is running ✅');
+});
+
 
 // Start the server
 app.listen(port, () => {
