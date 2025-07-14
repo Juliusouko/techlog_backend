@@ -1,507 +1,280 @@
+// ✅ Tech Logs Backend - Fully Migrated to PostgreSQL
+
 const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
-const bcrypt = require('bcrypt'); // For password hashing
-const jwt = require('jsonwebtoken'); // For JWT authentication
-require('dotenv').config(); // Load environment variables from .env file
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+require('dotenv').config();
 const { Pool } = require('pg');
-
 const app = express();
 const port = process.env.PORT || 3000;
-const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret_key'; // IMPORTANT: Use a strong, random key in production!
+const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret_key';
 
 app.use(cors({
-  origin: ['http://localhost:5174', 'https://your-frontend.web.app'], // add your Firebase frontend too
+  origin: ['http://localhost:5174', 'https://your-frontend.web.app'],
   credentials: true
 }));
 console.log('DATABASE_URL:', process.env.DATABASE_URL);
 
-
-// Middleware
-
-// --- PostgreSQL Setup ---
-const pgPool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
-});
-
-// --- PostgreSQL Table Creation (clean version, dependency order) ---
-pgPool.connect()
-    .then(() => {
-        console.log('Connected to the PostgreSQL database.');
-
-        // Create tables in the correct dependency order
-        return pgPool.query(`
-            CREATE TABLE IF NOT EXISTS users (
-                id SERIAL PRIMARY KEY,
-                username TEXT UNIQUE NOT NULL,
-                email TEXT UNIQUE NOT NULL,
-                password TEXT NOT NULL
-            );
-        `);
-    })
-    .then(() => {
-        console.log('Users table checked/created.');
-        return pgPool.query(`
-            CREATE TABLE IF NOT EXISTS posts (
-                id SERIAL PRIMARY KEY,
-                title TEXT NOT NULL,
-                content TEXT NOT NULL,
-                categories TEXT,
-                author_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                createdAt TEXT NOT NULL,
-                updatedAt TEXT
-            );
-        `);
-    })
-    .then(() => {
-        console.log('Posts table checked/created.');
-        return pgPool.query(`
-            CREATE TABLE IF NOT EXISTS comments (
-                id SERIAL PRIMARY KEY,
-                post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
-                author_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                content TEXT NOT NULL,
-                createdAt TEXT NOT NULL
-            );
-        `);
-    })
-    .then(() => {
-        console.log('Comments table checked/created.');
-        return pgPool.query(`
-            CREATE TABLE IF NOT EXISTS post_likes (
-                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
-                PRIMARY KEY (user_id, post_id)
-            );
-        `);
-    })
-    .then(() => {
-        console.log('Post Likes table checked/created.');
-    })
-    .catch(err => {
-        console.error('PostgreSQL init error:', err);
-    });
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// --- Database Setup ---
-// Use pgPool as the PostgreSQL client.
-const db = pgPool;
+const pgPool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
+});
 
-// --- Authentication Middleware (JWT-based) ---
+pgPool.connect()
+  .then(() => {
+    console.log('Connected to the PostgreSQL database.');
+    return pgPool.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        username TEXT UNIQUE NOT NULL,
+        email TEXT UNIQUE NOT NULL,
+        password TEXT NOT NULL
+      );
+    `);
+  })
+  .then(() => pgPool.query(`
+    CREATE TABLE IF NOT EXISTS posts (
+      id SERIAL PRIMARY KEY,
+      title TEXT NOT NULL,
+      content TEXT NOT NULL,
+      categories TEXT,
+      author_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      createdAt TEXT NOT NULL,
+      updatedAt TEXT
+    );
+  `))
+  .then(() => pgPool.query(`
+    CREATE TABLE IF NOT EXISTS comments (
+      id SERIAL PRIMARY KEY,
+      post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+      author_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      content TEXT NOT NULL,
+      createdAt TEXT NOT NULL
+    );
+  `))
+  .then(() => pgPool.query(`
+    CREATE TABLE IF NOT EXISTS post_likes (
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+      PRIMARY KEY (user_id, post_id)
+    );
+  `))
+  .then(() => console.log('All tables checked/created.'))
+  .catch(err => console.error('PostgreSQL init error:', err));
+
 const authenticateToken = (req, res, next) => {
-    // Get auth header value
-    const authHeader = req.headers['authorization'];
-    // Check if authHeader is undefined
-    if (typeof authHeader !== 'undefined') {
-        // Format is "Bearer TOKEN"
-        const token = authHeader.split(' ')[1];
-        if (!token) {
-            return res.status(401).json({ message: 'Unauthorized: No token provided.' });
-        }
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.status(401).json({ message: 'Unauthorized: No token provided.' });
 
-        jwt.verify(token, JWT_SECRET, (err, user) => {
-            if (err) {
-                // Token is invalid or expired
-                return res.status(403).json({ message: 'Forbidden: Invalid or expired token.' });
-            }
-            req.userId = user.id; // Attach user ID from token payload to request
-            next();
-        });
-    } else {
-        // No authorization header
-        res.status(401).json({ message: 'Unauthorized: No authorization header.' });
-    }
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) return res.status(403).json({ message: 'Forbidden: Invalid or expired token.' });
+    req.userId = user.id;
+    next();
+  });
 };
 
-// --- User Routes ---
-
-// Register a new user
 app.post('/register', async (req, res) => {
-    const { username, email, password } = req.body;
-    if (!username || !email || !password) {
-        return res.status(400).json({ message: 'Username, email, and password are required' });
-    }
-
-    try {
-        const hashedPassword = await bcrypt.hash(password, 10); // Hash the password
-        const result = await db.query(
-            "INSERT INTO users (username, email, password) VALUES ($1, $2, $3) RETURNING id",
-            [username, email, hashedPassword]
-        );
-        const userId = result.rows[0].id;
-        const token = jwt.sign({ id: userId }, JWT_SECRET, { expiresIn: '1h' });
-        res.status(201).json({
-            message: 'User registered successfully',
-            userId: userId,
-            username: username,
-            token: token
-        });
-    } catch (err) {
-        if (err.code === '23505') { // Unique violation
-            return res.status(409).json({ message: 'Username or email already exists' });
-        }
-        console.error('Error registering user:', err.message);
-        res.status(500).json({ message: 'Internal server error during registration.' });
-    }
-});
-
-// User login
-app.post('/login', (req, res) => {
-    const { username, password } = req.body;
-    if (!username || !password) {
-        return res.status(400).json({ message: 'Username and password are required' });
-    }
-
-    db.get("SELECT id, username, password FROM users WHERE username = ?", [username], async (err, user) => {
-        if (err) {
-            console.error('Error logging in:', err.message);
-            return res.status(500).json({ message: 'Error logging in' });
-        }
-        if (!user) {
-            return res.status(401).json({ message: 'Invalid username or password' });
-        }
-
-        try {
-            const isMatch = await bcrypt.compare(password, user.password);
-            if (!isMatch) {
-                return res.status(401).json({ message: 'Invalid username or password' });
-            }
-
-            const token = jwt.sign({ id: user.id }, JWT_SECRET, { expiresIn: '1h' });
-            res.status(200).json({
-                message: 'Login successful',
-                userId: user.id,
-                username: user.username,
-                token: token
-            });
-        } catch (compareErr) {
-            console.error('Error comparing passwords:', compareErr);
-            res.status(500).json({ message: 'Internal server error during login.' });
-        }
-    });
-});
-
-// --- Blog Post Routes (CRUD operations using SQLite) ---
-
-// Helper function to get like count for a post
-const getLikeCount = (postId) => {
-    return new Promise((resolve, reject) => {
-        db.get("SELECT COUNT(*) AS likes FROM post_likes WHERE post_id = ?", [postId], (err, row) => {
-            if (err) {
-                reject(err);
-            } else {
-                resolve(row.likes);
-            }
-        });
-    });
-};
-
-// GET all blog posts with author usernames and like counts
-app.get('/posts', async (req, res) => {
-  const { search, category } = req.query;
-  let query = `
-    SELECT p.id, p.title, p.content, p.categories, p.createdAt, p.updatedAt, 
-           u.username AS author, u.id AS author_id
-    FROM posts p
-    JOIN users u ON p.author_id = u.id`;
-  let params = [];
-  let whereClauses = [];
-
-  if (search) {
-    whereClauses.push(`(p.title ILIKE $${params.length + 1} OR p.content ILIKE $${params.length + 2})`);
-    params.push(`%${search}%`, `%${search}%`);
-  }
-
-  if (category) {
-    whereClauses.push(`p.categories ILIKE $${params.length + 1}`);
-    params.push(`%${category}%`);
-  }
-
-  if (whereClauses.length > 0) {
-    query += ` WHERE ${whereClauses.join(' AND ')}`;
-  }
-
-  query += ` ORDER BY p.createdAt DESC`;
+  const { username, email, password } = req.body;
+  if (!username || !email || !password) return res.status(400).json({ message: 'Username, email, and password are required' });
 
   try {
-    const result = await pgPool.query(query, params);
-
-    // Optional: fetch like counts — assuming you have a likes table
-    const postsWithLikes = await Promise.all(result.rows.map(async (post) => {
-      const likeResult = await pgPool.query(
-        'SELECT COUNT(*) FROM post_likes WHERE post_id = $1',
-        [post.id]
-      );
-      const likes = parseInt(likeResult.rows[0].count || '0');
-      return { ...post, likes };
-    }));
-
-    res.status(200).json(postsWithLikes);
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const result = await pgPool.query(
+      'INSERT INTO users (username, email, password) VALUES ($1, $2, $3) RETURNING id',
+      [username, email, hashedPassword]
+    );
+    const token = jwt.sign({ id: result.rows[0].id }, JWT_SECRET, { expiresIn: '1h' });
+    res.status(201).json({ message: 'User registered successfully', userId: result.rows[0].id, username, token });
   } catch (err) {
-    console.error('Error fetching posts:', err.message);
-    res.status(500).json({ message: 'Error fetching posts' });
+    if (err.code === '23505') return res.status(409).json({ message: 'Username or email already exists' });
+    console.error('Register error:', err.message);
+    res.status(500).json({ message: 'Internal server error during registration.' });
   }
 });
 
+app.post('/login', async (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) return res.status(400).json({ message: 'Username and password are required' });
 
-// GET a single blog post by ID with author username and like count
+  try {
+    const result = await pgPool.query('SELECT id, username, password FROM users WHERE username = $1', [username]);
+    const user = result.rows[0];
+    if (!user) return res.status(401).json({ message: 'Invalid username or password' });
+
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) return res.status(401).json({ message: 'Invalid username or password' });
+
+    const token = jwt.sign({ id: user.id }, JWT_SECRET, { expiresIn: '1h' });
+    res.status(200).json({ message: 'Login successful', userId: user.id, username: user.username, token });
+  } catch (err) {
+    console.error('Login error:', err.message);
+    res.status(500).json({ message: 'Internal server error during login.' });
+  }
+});
+
+app.get('/profile', authenticateToken, async (req, res) => {
+  try {
+    const result = await pgPool.query('SELECT id, username FROM users WHERE id = $1', [req.userId]);
+    if (!result.rows[0]) return res.status(404).json({ message: 'User not found' });
+    res.json({ userId: result.rows[0].id, username: result.rows[0].username });
+  } catch (err) {
+    console.error('Profile error:', err);
+    res.status(500).json({ message: 'Error retrieving profile' });
+  }
+});
+
 app.get('/posts/:id', async (req, res) => {
-    const { id } = req.params;
-    const query = `SELECT p.id, p.title, p.content, p.categories, p.createdAt, p.updatedAt, u.username AS author, u.id AS author_id
-                   FROM posts p
-                   JOIN users u ON p.author_id = u.id
-                   WHERE p.id = ?`;
-    db.get(query, [id], async (err, row) => {
-        if (err) {
-            console.error(`Error fetching post ${id}:`, err.message);
-            return res.status(500).json({ message: 'Error fetching post' });
-        }
-        if (row) {
-            const likes = await getLikeCount(row.id);
-            res.status(200).json({ ...row, likes });
-        } else {
-            res.status(404).json({ message: 'Post not found' });
-        }
-    });
+  const { id } = req.params;
+  try {
+    const post = await pgPool.query(`
+      SELECT p.*, u.username AS author
+      FROM posts p
+      JOIN users u ON p.author_id = u.id
+      WHERE p.id = $1
+    `, [id]);
+    if (!post.rows[0]) return res.status(404).json({ message: 'Post not found' });
+
+    const likeCount = await pgPool.query('SELECT COUNT(*) FROM post_likes WHERE post_id = $1', [id]);
+    res.json({ ...post.rows[0], likes: parseInt(likeCount.rows[0].count) });
+  } catch (err) {
+    console.error('Fetch single post error:', err.message);
+    res.status(500).json({ message: 'Error fetching post' });
+  }
 });
 
-// CREATE a new blog post
-app.post('/posts', authenticateToken, (req, res) => {
-    const { title, content, categories } = req.body;
-    const author_id = req.userId; // Get author_id from authenticated token
+app.post('/posts', authenticateToken, async (req, res) => {
+  const { title, content, categories } = req.body;
+  const createdAt = new Date().toISOString();
 
-    if (!title || !content) {
-        return res.status(400).json({ message: 'Title and content are required' });
-    }
+  try {
+    const result = await pgPool.query(`
+      INSERT INTO posts (title, content, categories, author_id, createdAt)
+      VALUES ($1, $2, $3, $4, $5) RETURNING *
+    `, [title, content, categories || '', req.userId, createdAt]);
 
-    const createdAt = new Date().toISOString();
-
-    db.run("INSERT INTO posts (title, content, categories, author_id, createdAt) VALUES (?, ?, ?, ?, ?)",
-        [title, content, categories || '', author_id, createdAt],
-        function(err) {
-            if (err) {
-                console.error('Error creating post:', err.message);
-                return res.status(500).json({ message: 'Error creating post' });
-            }
-            res.status(201).json({
-                message: 'Post created successfully',
-                id: this.lastID,
-                title,
-                content,
-                categories: categories || '',
-                likes: 0, // Initial likes is 0
-                author_id,
-                createdAt
-            });
-        }
-    );
+    res.status(201).json({ ...result.rows[0], likes: 0 });
+  } catch (err) {
+    console.error('Create post error:', err.message);
+    res.status(500).json({ message: 'Error creating post' });
+  }
 });
 
-// UPDATE an existing blog post
-app.put('/posts/:id', authenticateToken, (req, res) => {
-    const { id } = req.params;
-    const { title, content, categories } = req.body;
-    const userIdFromToken = req.userId; // User ID from authenticated token
+app.put('/posts/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { title, content, categories } = req.body;
+  const updatedAt = new Date().toISOString();
+  let fields = [], params = [], i = 1;
 
-    if (!title && !content && !categories) {
-        return res.status(400).json({ message: 'At least title, content, or categories is required for update' });
-    }
+  if (title !== undefined) { fields.push(`title = $${i++}`); params.push(title); }
+  if (content !== undefined) { fields.push(`content = $${i++}`); params.push(content); }
+  if (categories !== undefined) { fields.push(`categories = $${i++}`); params.push(categories); }
+  fields.push(`updatedAt = $${i}`); params.push(updatedAt);
+  params.push(id, req.userId);
 
-    const updatedAt = new Date().toISOString();
-    let fields = [];
-    let params = [];
-
-    if (title !== undefined) {
-        fields.push('title = ?');
-        params.push(title);
-    }
-    if (content !== undefined) {
-        fields.push('content = ?');
-        params.push(content);
-    }
-    if (categories !== undefined) {
-        fields.push('categories = ?');
-        params.push(categories);
-    }
-
-    fields.push('updatedAt = ?');
-    params.push(updatedAt);
-
-    // Ensure the user updating the post is the author of the post
-    params.push(id);
-    params.push(userIdFromToken);
-
-    const query = `UPDATE posts SET ${fields.join(', ')} WHERE id = ? AND author_id = ?`;
-
-    db.run(query, params, function(err) {
-        if (err) {
-            console.error(`Error updating post ${id}:`, err.message);
-            return res.status(500).json({ message: 'Error updating post' });
-        }
-        if (this.changes === 0) {
-            return res.status(403).json({ message: 'Post not found or you are not authorized to update this post.' });
-        }
-        res.status(200).json({ message: 'Post updated successfully', postId: id, changes: this.changes });
-    });
+  const query = `UPDATE posts SET ${fields.join(', ')} WHERE id = $${i + 1} AND author_id = $${i + 2}`;
+  try {
+    const result = await pgPool.query(query, params);
+    if (result.rowCount === 0) return res.status(403).json({ message: 'Not authorized or post not found' });
+    res.json({ message: 'Post updated successfully' });
+  } catch (err) {
+    console.error('Update post error:', err.message);
+    res.status(500).json({ message: 'Error updating post' });
+  }
 });
 
-// DELETE a blog post
-app.delete('/posts/:id', authenticateToken, (req, res) => {
-    const { id } = req.params;
-    const userIdFromToken = req.userId; // User ID from authenticated token
-
-    // Ensure the user deleting the post is the author of the post
-    db.run("DELETE FROM posts WHERE id = ? AND author_id = ?", [id, userIdFromToken], function(err) {
-        if (err) {
-            console.error(`Error deleting post ${id}:`, err.message);
-            return res.status(500).json({ message: 'Error deleting post' });
-        }
-        if (this.changes === 0) {
-            return res.status(403).json({ message: 'Post not found or you are not authorized to delete this post.' });
-        }
-        res.status(204).send(); // 204 No Content for successful deletion
-    });
+app.delete('/posts/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const result = await pgPool.query('DELETE FROM posts WHERE id = $1 AND author_id = $2', [id, req.userId]);
+    if (result.rowCount === 0) return res.status(403).json({ message: 'Not authorized or post not found' });
+    res.sendStatus(204);
+  } catch (err) {
+    console.error('Delete post error:', err.message);
+    res.status(500).json({ message: 'Error deleting post' });
+  }
 });
 
-// --- Like/Unlike Post Routes ---
-
-// Like a post
-app.post('/posts/:id/like', authenticateToken, (req, res) => {
-    const { id: postId } = req.params;
-    const userId = req.userId; // User ID from authenticated token
-
-    // Check if user has already liked this post
-    db.get("SELECT * FROM post_likes WHERE user_id = ? AND post_id = ?", [userId, postId], (err, row) => {
-        if (err) {
-            console.error('Error checking like status:', err.message);
-            return res.status(500).json({ message: 'Internal server error.' });
-        }
-        if (row) {
-            return res.status(409).json({ message: 'You have already liked this post.' });
-        }
-
-        // Add like to post_likes table
-        db.run("INSERT INTO post_likes (user_id, post_id) VALUES (?, ?)", [userId, postId], function(err) {
-            if (err) {
-                console.error(`Error liking post ${postId}:`, err.message);
-                return res.status(500).json({ message: 'Error liking post' });
-            }
-            if (this.changes === 0) {
-                 // This case should ideally not be hit if the row check passed and no DB error.
-                return res.status(404).json({ message: 'Post not found or could not record like.' });
-            }
-            res.status(200).json({ message: 'Post liked successfully', postId: postId });
-        });
-    });
+app.post('/posts/:id/like', authenticateToken, async (req, res) => {
+  const postId = req.params.id;
+  try {
+    const existing = await pgPool.query('SELECT * FROM post_likes WHERE user_id = $1 AND post_id = $2', [req.userId, postId]);
+    if (existing.rows.length > 0) return res.status(409).json({ message: 'You already liked this post.' });
+    await pgPool.query('INSERT INTO post_likes (user_id, post_id) VALUES ($1, $2)', [req.userId, postId]);
+    res.json({ message: 'Post liked successfully' });
+  } catch (err) {
+    console.error('Like post error:', err.message);
+    res.status(500).json({ message: 'Error liking post' });
+  }
 });
 
-// Unlike a post
-app.post('/posts/:id/unlike', authenticateToken, (req, res) => {
-    const { id: postId } = req.params;
-    const userId = req.userId; // User ID from authenticated token
-
-    // Remove like from post_likes table
-    db.run("DELETE FROM post_likes WHERE user_id = ? AND post_id = ?", [userId, postId], function(err) {
-        if (err) {
-            console.error(`Error unliking post ${postId}:`, err.message);
-            return res.status(500).json({ message: 'Error unliking post' });
-        }
-        if (this.changes === 0) {
-            return res.status(404).json({ message: 'Like not found or you have not liked this post.' });
-        }
-        res.status(200).json({ message: 'Post unliked successfully', postId: postId });
-    });
+app.post('/posts/:id/unlike', authenticateToken, async (req, res) => {
+  const postId = req.params.id;
+  try {
+    const result = await pgPool.query('DELETE FROM post_likes WHERE user_id = $1 AND post_id = $2', [req.userId, postId]);
+    if (result.rowCount === 0) return res.status(404).json({ message: 'You have not liked this post.' });
+    res.json({ message: 'Post unliked successfully' });
+  } catch (err) {
+    console.error('Unlike post error:', err.message);
+    res.status(500).json({ message: 'Error unliking post' });
+  }
 });
 
-
-// --- Comment Routes ---
-
-// GET comments for a specific post with author usernames
-app.get('/posts/:postId/comments', (req, res) => {
-    const { postId } = req.params;
-    const query = `SELECT c.id, c.content, c.createdAt, u.username AS author, u.id AS author_id
-                   FROM comments c
-                   JOIN users u ON c.author_id = u.id
-                   WHERE c.post_id = ?
-                   ORDER BY c.createdAt ASC`;
-    db.all(query, [postId], (err, rows) => {
-        if (err) {
-            console.error(`Error fetching comments for post ${postId}:`, err.message);
-            return res.status(500).json({ message: 'Error fetching comments' });
-        }
-        res.status(200).json(rows);
-    });
+app.get('/posts/:postId/comments', async (req, res) => {
+  const { postId } = req.params;
+  try {
+    const result = await pgPool.query(`
+      SELECT c.id, c.content, c.createdAt, u.username AS author, u.id AS author_id
+      FROM comments c
+      JOIN users u ON c.author_id = u.id
+      WHERE c.post_id = $1 ORDER BY c.createdAt ASC
+    `, [postId]);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Fetch comments error:', err.message);
+    res.status(500).json({ message: 'Error fetching comments' });
+  }
 });
 
-// ADD a comment to a post
-app.post('/posts/:postId/comments', authenticateToken, (req, res) => {
-    const { postId } = req.params;
-    const { content } = req.body;
-    const author_id = req.userId; // Get author_id from authenticated token
+app.post('/posts/:postId/comments', authenticateToken, async (req, res) => {
+  const { postId } = req.params;
+  const { content } = req.body;
+  const createdAt = new Date().toISOString();
 
-    if (!content) {
-        return res.status(400).json({ message: 'Comment content is required' });
-    }
-
-    const createdAt = new Date().toISOString();
-
-    db.run("INSERT INTO comments (post_id, author_id, content, createdAt) VALUES (?, ?, ?, ?)",
-        [postId, author_id, content, createdAt],
-        function(err) {
-            if (err) {
-                console.error('Error adding comment:', err.message);
-                return res.status(500).json({ message: 'Error adding comment' });
-            }
-            res.status(201).json({
-                message: 'Comment added successfully',
-                id: this.lastID,
-                post_id: postId,
-                author_id,
-                content,
-                createdAt
-            });
-        }
-    );
+  try {
+    const result = await pgPool.query(`
+      INSERT INTO comments (post_id, author_id, content, createdAt)
+      VALUES ($1, $2, $3, $4) RETURNING *
+    `, [postId, req.userId, content, createdAt]);
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error('Add comment error:', err.message);
+    res.status(500).json({ message: 'Error adding comment' });
+  }
 });
 
-// DELETE a comment (only by author)
-app.delete('/comments/:id', authenticateToken, (req, res) => {
-    const { id } = req.params;
-    const userIdFromToken = req.userId; // User ID from authenticated token
-
-    // Ensure the user deleting the comment is the author of the comment
-    db.run("DELETE FROM comments WHERE id = ? AND author_id = ?", [id, userIdFromToken], function(err) {
-        if (err) {
-            console.error(`Error deleting comment ${id}:`, err.message);
-            return res.status(500).json({ message: 'Error deleting comment' });
-        }
-        if (this.changes === 0) {
-            return res.status(403).json({ message: 'Comment not found or you are not authorized to delete this comment.' });
-        }
-        res.status(204).send(); // 204 No Content for successful deletion
-    });
+app.delete('/comments/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const result = await pgPool.query('DELETE FROM comments WHERE id = $1 AND author_id = $2', [id, req.userId]);
+    if (result.rowCount === 0) return res.status(403).json({ message: 'Comment not found or not authorized.' });
+    res.sendStatus(204);
+  } catch (err) {
+    console.error('Delete comment error:', err.message);
+    res.status(500).json({ message: 'Error deleting comment' });
+  }
 });
 
 app.get('/', (req, res) => {
   res.send('Tech Logs Backend is running ✅');
 });
 
-
-// Start the server
 app.listen(port, () => {
-    console.log(`Tech Logs Backend listening at http://localhost:${port}`);
-    console.log('Database file: blog.db');
+  console.log(`Tech Logs Backend listening at http://localhost:${port}`);
 });
-
-// Close the database connection when the app closes
-process.on('SIGINT', () => {
-    db.close((err) => {
-        if (err) {
-            console.error('Error closing database:', err.message);
-        }
-        console.log('Database connection closed.');
-        process.exit(0);
-    });
-});
+// Export the pool for testing purposes
