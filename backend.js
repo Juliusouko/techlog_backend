@@ -225,6 +225,35 @@ app.post('/posts/:id/unlike', authenticateToken, async (req, res) => {
   }
 });
 
+app.get('/posts', async (req, res) => {
+  try {
+    const result = await pgPool.query(`
+      SELECT p.id, p.title, p.content, p.categories, p.createdAt, p.updatedAt,
+             u.username AS author
+      FROM posts p
+      JOIN users u ON p.author_id = u.id
+      ORDER BY p.createdAt DESC
+    `);
+
+    const postsWithLikes = await Promise.all(
+      result.rows.map(async (post) => {
+        const likeResult = await pgPool.query(
+          'SELECT COUNT(*) FROM post_likes WHERE post_id = $1',
+          [post.id]
+        );
+        const likes = parseInt(likeResult.rows[0].count || '0');
+        return { ...post, likes };
+      })
+    );
+
+    res.status(200).json(postsWithLikes);
+  } catch (err) {
+    console.error('Error fetching posts:', err.message);
+    res.status(500).json({ message: 'Error fetching posts' });
+  }
+});
+
+
 app.get('/posts/:postId/comments', async (req, res) => {
   const { postId } = req.params;
   try {
