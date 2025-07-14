@@ -12,13 +12,9 @@ const port = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret_key';
 
 app.use(cors({
-  origin: ['http://localhost:5174', 'https://your-frontend.web.app'],
-  credentials: true
+  origin: 'http://localhost:5174'
 }));
 console.log('DATABASE_URL:', process.env.DATABASE_URL);
-
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
 
 const pgPool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -298,6 +294,9 @@ app.delete('/comments/:id', authenticateToken, async (req, res) => {
     res.status(500).json({ message: 'Error deleting comment' });
   }
 });
+
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
 
 app.get('/', (req, res) => {
   res.send('Tech Logs Backend is running ✅');
