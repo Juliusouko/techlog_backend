@@ -11,6 +11,7 @@ const app = express();
 const port = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || "your_jwt_secret_key";
 
+app.use(express.json());
 app.use(
   cors({
     origin: '*',
@@ -97,12 +98,9 @@ const authenticateToken = (req, res, next) => {
 };
 
 app.post("/register", async (req, res) => {
-  console.log("Request body for register:", req.body); 
   const { username, email, password } = req.body;
   if (!username || !email || !password)
-    return res
-      .status(400)
-      .json({ message: "Username, email, and password are required" });
+    return res.status(400).json({ message: "Username, email, and password are required" });
 
   try {
     const hashedPassword = await bcrypt.hash(password, 10);
@@ -126,7 +124,7 @@ app.post("/register", async (req, res) => {
       return res
         .status(409)
         .json({ message: "Username or email already exists" });
-    console.error("Register error:", err.message);
+    console.error("Register error:", err);
     res
       .status(500)
       .json({ message: "Internal server error during registration." });
