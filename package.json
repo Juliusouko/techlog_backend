@@ -8,7 +8,6 @@
     "pg": "^8.16.3"
   },
   "scripts": {
-  "start": "node backend.js"
-}
-
+    "start": "node backend.js"
+  }
 }
